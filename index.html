@@ -1,1 +1,1170 @@
 
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pops of Mithila - Global Makhana Store</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f7f7f7; }
+        .makhana-card { transition: transform 0.3s ease, box-shadow 0.3s ease; }
+        .makhana-card:hover { transform: translateY(-5px); box-shadow: 0 15px 30px rgba(0, 0, 0, 0.1); }
+        .btn-primary { background-color: #e53e3e; border-color: #c53030; }
+        .btn-primary:hover { background-color: #c53030; }
+        .modal-overlay { background-color: rgba(0, 0, 0, 0.7); }
+        .admin-input-group label { width: 100px; }
+        /* Star Rating CSS */
+        .star-rating { unicode-bidi: bidi-override; direction: rtl; }
+        .star-rating > input { display: none; }
+        .star-rating > label:before {
+            content: "\2605"; /* Unicode star */
+            font-size: 24px;
+            color: #ccc;
+            padding: 2px;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+        .star-rating > input:checked ~ label:before,
+        .star-rating > label:hover:before,
+        .star-rating > label:hover ~ label:before {
+            color: #ffc700;
+        }
+        .review-card { border-left: 4px solid #fbd38d; }
+
+        /* Print Style for Label */
+        @media print {
+            body * { visibility: hidden; }
+            .print-area, .print-area * { visibility: visible; }
+            .print-area {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 100%;
+                /* Standard shipping label size */
+                height: 4in; 
+                margin: 0.25in;
+                padding: 10px;
+                border: 2px solid #000;
+                box-shadow: none !important;
+            }
+            .no-print { display: none !important; }
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, addDoc, getDocs, arrayUnion, arrayRemove, runTransaction, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables provided by the environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        
+        // Set Firebase logging level (optional, but good for debugging)
+        setLogLevel('debug');
+
+        // Global State Variables
+        let userId = null;
+        let isAdmin = false;
+        let cart = {}; // {productId: {itemData, quantity}}
+        let products = []; // Array of all products
+        let currency = 'INR';
+        const EXCHANGE_RATE = 83.0; // 1 USD = 83 INR (for mock conversion)
+        
+        // Firestore Path Helpers
+        const getPrivateCartRef = (uid) => doc(db, 'artifacts', appId, 'users', uid, 'data', 'cart');
+        const getPublicProductsCollectionRef = () => collection(db, 'artifacts', appId, 'public', 'data', 'makhana_products');
+        const getPublicOrdersCollectionRef = () => collection(db, 'artifacts', appId, 'public', 'data', 'orders');
+        const getPublicReviewsCollectionRef = (productId) => collection(db, 'artifacts', appId, 'public', 'data', 'reviews', productId, 'ratings');
+
+        // --- Utility Functions ---
+        
+        // Format price based on current currency
+        const formatPrice = (priceInINR) => {
+            if (currency === 'USD') {
+                const priceInUSD = priceInINR / EXCHANGE_RATE;
+                return `$${priceInUSD.toFixed(2)}`;
+            }
+            return `₹${priceInINR.toFixed(2)}`;
+        };
+        
+        // Star rating HTML
+        const getStarHtml = (rating) => {
+            const fullStars = Math.floor(rating);
+            const halfStar = rating % 1 >= 0.5 ? 1 : 0;
+            const emptyStars = 5 - fullStars - halfStar;
+            
+            let html = '';
+            // Full Stars
+            for (let i = 0; i < fullStars; i++) {
+                html += '<i class="fa-solid fa-star text-yellow-400 text-sm"></i>';
+            }
+            // Half Star (Font Awesome 6 uses 'star-half-stroke')
+            if (halfStar) {
+                html += '<i class="fa-solid fa-star-half-stroke text-yellow-400 text-sm"></i>';
+            }
+            // Empty Stars
+            for (let i = 0; i < emptyStars; i++) {
+                html += '<i class="fa-regular fa-star text-gray-300 text-sm"></i>';
+            }
+            return html;
+        };
+
+        // Custom Alert/Message Box Function
+        const showMessage = (message, type = 'info') => {
+            const alertBox = document.getElementById('global-alert');
+            alertBox.innerHTML = `
+                <div class="p-3 rounded-lg shadow-lg ${type === 'error' ? 'bg-red-500' : 'bg-green-500'} text-white text-center">
+                    ${message}
+                </div>
+            `;
+            alertBox.classList.remove('hidden');
+            setTimeout(() => {
+                alertBox.classList.add('hidden');
+            }, 3000);
+        };
+
+        // --- Authentication Logic ---
+
+        const updateAuthUI = (user) => {
+            const authButton = document.getElementById('auth-button');
+            const authText = document.getElementById('auth-text');
+            const adminButton = document.getElementById('admin-button');
+            const myOrdersButton = document.getElementById('my-orders-button');
+            
+            if (user && !user.isAnonymous) {
+                userId = user.uid;
+                const email = user.email;
+                isAdmin = email === 'admin@mithila.com';
+                
+                authButton.innerHTML = `<i class="fas fa-sign-out-alt mr-2"></i> Logout`;
+                authButton.onclick = handleLogout;
+                authText.textContent = isAdmin ? 'Admin' : email.split('@')[0];
+
+                if (isAdmin) {
+                    adminButton.classList.remove('hidden');
+                    myOrdersButton.innerHTML = `<i class="fas fa-box-open mr-2"></i> Orders & Labels`;
+                } else {
+                    adminButton.classList.add('hidden');
+                    myOrdersButton.innerHTML = `<i class="fas fa-shopping-bag mr-2"></i> My Orders`;
+                }
+                myOrdersButton.classList.remove('hidden');
+
+            } else {
+                userId = null; // We rely on Firebase UID now, not anonymous ID
+                isAdmin = false;
+                authButton.innerHTML = `<i class="fas fa-user-circle mr-2"></i> Login / Signup`;
+                authButton.onclick = () => document.getElementById('auth-modal').classList.remove('hidden');
+                authText.textContent = 'Guest';
+                adminButton.classList.add('hidden');
+                myOrdersButton.classList.add('hidden');
+            }
+        };
+
+        const handleSignup = async () => {
+            const email = document.getElementById('auth-email').value;
+            const password = document.getElementById('auth-password').value;
+            
+            if (!email || password.length < 6) {
+                showMessage('Please enter a valid email and a password of at least 6 characters.', 'error');
+                return;
+            }
+
+            try {
+                await createUserWithEmailAndPassword(auth, email, password);
+                showMessage('Signup successful! You are now logged in.', 'info');
+                document.getElementById('auth-modal').classList.add('hidden');
+            } catch (error) {
+                if (error.code === 'auth/email-already-in-use') {
+                    showMessage('This email is already registered. Please login instead.', 'error');
+                } else {
+                    showMessage(`Signup Failed: ${error.message}`, 'error');
+                }
+                console.error("Signup error:", error);
+            }
+        };
+
+        const handleLogin = async () => {
+            const email = document.getElementById('auth-email').value;
+            const password = document.getElementById('auth-password').value;
+            
+            if (!email || !password) {
+                showMessage('Please enter both email and password.', 'error');
+                return;
+            }
+
+            try {
+                await signInWithEmailAndPassword(auth, email, password);
+                showMessage('Login successful!', 'info');
+                document.getElementById('auth-modal').classList.add('hidden');
+            } catch (error) {
+                showMessage('Login Failed: Invalid email or password.', 'error');
+                console.error("Login error:", error);
+            }
+        };
+
+        const handleLogout = async () => {
+            try {
+                // Before logging out, sign in anonymously to keep the Firebase session active for read access
+                await signOut(auth);
+                await signInAnonymously(auth);
+                showMessage('Logged out successfully.', 'info');
+                // The onAuthStateChanged listener will handle the UI update
+            } catch (error) {
+                showMessage(`Logout Failed: ${error.message}`, 'error');
+                console.error("Logout error:", error);
+            }
+        };
+
+
+        // --- Cart Logic ---
+
+        const saveCartToFirestore = async (uid, currentCart) => {
+            if (!uid) return;
+            const cartRef = getPrivateCartRef(uid);
+            try {
+                await setDoc(cartRef, { items: JSON.stringify(currentCart) }, { merge: true });
+                // console.log("Cart saved successfully to Firestore.");
+            } catch (error) {
+                console.error("Error saving cart to Firestore:", error);
+            }
+        };
+
+        const loadCartFromFirestore = async (uid) => {
+            if (!uid) return {};
+            const cartRef = getPrivateCartRef(uid);
+            try {
+                const docSnap = await getDoc(cartRef);
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    return data.items ? JSON.parse(data.items) : {};
+                }
+            } catch (error) {
+                console.error("Error loading cart from Firestore:", error);
+            }
+            return {};
+        };
+        
+        const updateCartUI = () => {
+            const cartList = document.getElementById('cart-list');
+            const cartCount = document.getElementById('cart-count');
+            const cartTotal = document.getElementById('cart-total');
+            const cartCheckoutButton = document.getElementById('cart-checkout-button');
+
+            let total = 0;
+            let count = 0;
+            let html = '';
+
+            for (const productId in cart) {
+                const item = cart[productId];
+                const product = products.find(p => p.id === productId);
+
+                if (!product) continue; // Skip if product data is missing
+
+                const itemPrice = item.quantity * product.price;
+                total += itemPrice;
+                count += item.quantity;
+                
+                const currentStock = product.stock || 0;
+                const isOverstocked = item.quantity > currentStock;
+                const quantityClass = isOverstocked ? 'text-red-500 font-bold' : 'text-gray-700';
+                const warningMessage = isOverstocked ? `<span class="text-xs text-red-500 block">Stock Low! Available: ${currentStock}</span>` : '';
+
+                html += `
+                    <li class="flex justify-between items-center py-3 border-b border-gray-100">
+                        <div class="flex-1">
+                            <p class="font-semibold text-gray-800">${product.name}</p>
+                            ${warningMessage}
+                            <span class="text-sm text-gray-500">${formatPrice(product.price)} x 
+                                <span class="${quantityClass}">${item.quantity}</span>
+                            </span>
+                        </div>
+                        <div class="text-right flex items-center">
+                            <span class="font-bold text-gray-900 w-24">${formatPrice(itemPrice)}</span>
+                            <button onclick="window.removeItemFromCart('${productId}')" class="ml-4 text-red-500 hover:text-red-700 p-1 rounded-full bg-red-100 transition duration-150">
+                                <i class="fas fa-trash-alt text-xs"></i>
+                            </button>
+                        </div>
+                    </li>
+                `;
+            }
+
+            if (count === 0) {
+                html = '<p class="text-center text-gray-500 p-4">Your cart is empty!</p>';
+                cartCheckoutButton.disabled = true;
+                cartCheckoutButton.classList.add('opacity-50', 'cursor-not-allowed');
+            } else {
+                cartCheckoutButton.disabled = false;
+                cartCheckoutButton.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+
+            cartList.innerHTML = html;
+            cartCount.textContent = count;
+            cartTotal.textContent = formatPrice(total);
+            saveCartToFirestore(auth.currentUser?.uid, cart);
+        };
+        
+        // Expose to window for inline HTML calls
+        window.removeItemFromCart = (productId) => {
+            delete cart[productId];
+            updateCartUI();
+        };
+
+        window.addToCart = (productId, quantity = 1) => {
+            const product = products.find(p => p.id === productId);
+            if (!product) {
+                showMessage('Product not found.', 'error');
+                return;
+            }
+            
+            const currentStock = product.stock || 0;
+            
+            // Check if stock is zero
+            if (currentStock === 0) {
+                showMessage(`Sorry, ${product.name} is currently out of stock.`, 'error');
+                return;
+            }
+
+            const currentQuantity = cart[productId] ? cart[productId].quantity : 0;
+            const newQuantity = currentQuantity + quantity;
+
+            // Check if new quantity exceeds stock
+            if (newQuantity > currentStock) {
+                showMessage(`Maximum stock available for ${product.name} is ${currentStock}. You have ${currentQuantity} in cart.`, 'error');
+                return;
+            }
+
+            cart[productId] = { ...product, quantity: newQuantity };
+            updateCartUI();
+            showMessage(`${product.name} added to cart!`);
+        };
+
+
+        // --- Product & UI Rendering ---
+
+        const renderProducts = () => {
+            const container = document.getElementById('product-grid');
+            const searchInput = document.getElementById('search-input').value.toLowerCase();
+            let html = '';
+
+            const filteredProducts = products.filter(p => p.name.toLowerCase().includes(searchInput) || p.flavor.toLowerCase().includes(searchInput));
+
+            if (filteredProducts.length === 0) {
+                container.innerHTML = '<p class="col-span-full text-center text-lg text-gray-500 py-10">No products found matching your search.</p>';
+                return;
+            }
+
+            filteredProducts.forEach(product => {
+                const isOutOfStock = product.stock === 0;
+                const buttonHtml = isOutOfStock
+                    ? `<button class="w-full py-2 bg-gray-400 text-white font-bold rounded-xl cursor-not-allowed" disabled>स्टॉक में नहीं</button>`
+                    : `<button onclick="window.addToCart('${product.id}')" class="w-full py-2 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 transition duration-150">कार्ट में जोड़ें</button>`;
+                
+                const stockBadge = isOutOfStock
+                    ? '<span class="absolute top-3 right-3 bg-red-600 text-white text-xs font-bold px-3 py-1 rounded-full shadow-lg">Out of Stock</span>'
+                    : product.stock <= 5 ? `<span class="absolute top-3 right-3 bg-yellow-500 text-white text-xs font-bold px-3 py-1 rounded-full shadow-lg">Low Stock (${product.stock})</span>` : '';
+
+                html += `
+                    <div class="makhana-card bg-white p-5 rounded-3xl shadow-lg flex flex-col justify-between">
+                        <!-- Clickable Image/Info Area -->
+                        <div onclick="window.showProductDetails('${product.id}')" class="cursor-pointer">
+                            <div class="relative mb-4">
+                                <img src="${product.image}" alt="${product.name}" class="w-full h-40 object-cover rounded-2xl">
+                                ${stockBadge}
+                            </div>
+                            <h3 class="text-xl font-extrabold text-gray-900 truncate">${product.name}</h3>
+                            <p class="text-sm text-gray-500 mb-3">${product.flavor} फ्लेवर</p>
+                            <div class="flex items-center mb-2">
+                                ${getStarHtml(product.averageRating || 0)}
+                                <span class="text-xs text-gray-500 ml-2">(${product.reviewCount || 0} Reviews)</span>
+                            </div>
+                        </div>
+                        
+                        <!-- Price and Button -->
+                        <div>
+                            <p class="text-2xl font-black text-gray-800 mb-4">${formatPrice(product.price)}</p>
+                            ${buttonHtml}
+                        </div>
+                    </div>
+                `;
+            });
+
+            container.innerHTML = html;
+        };
+
+        // Expose to window for inline HTML calls
+        window.handleSearch = renderProducts;
+
+        // --- Product Details & Review Modal Logic ---
+
+        window.showProductDetails = async (productId) => {
+            const product = products.find(p => p.id === productId);
+            if (!product) return;
+
+            const modal = document.getElementById('product-detail-modal');
+            const modalContent = document.getElementById('product-detail-content');
+            const reviewsContainer = document.getElementById('reviews-container');
+            const reviewForm = document.getElementById('review-form');
+
+            // Set up review form visibility
+            if (userId && !isAdmin) {
+                reviewForm.classList.remove('hidden');
+                document.getElementById('review-product-id').value = productId;
+            } else {
+                reviewForm.classList.add('hidden');
+            }
+            
+            // Set up rating display
+            const ratingHtml = getStarHtml(product.averageRating || 0);
+            const ratingText = product.averageRating ? product.averageRating.toFixed(1) : '0.0';
+
+            // Base Modal Content
+            modalContent.innerHTML = `
+                <div class="md:flex">
+                    <div class="md:w-1/2 p-4">
+                        <img src="${product.image}" alt="${product.name}" class="w-full max-h-80 object-cover rounded-xl shadow-md mb-4">
+                        <p class="text-4xl font-extrabold text-red-600 mb-2">${formatPrice(product.price)}</p>
+                        <div class="flex items-center mb-4">
+                            ${ratingHtml}
+                            <span class="text-xl font-bold text-gray-800 ml-2">${ratingText}</span>
+                            <span class="text-sm text-gray-500 ml-2">(${product.reviewCount || 0} reviews)</span>
+                        </div>
+                        <button onclick="window.addToCart('${product.id}')" class="w-full py-3 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 transition duration-150 ${product.stock === 0 ? 'opacity-50 cursor-not-allowed' : ''}" ${product.stock === 0 ? 'disabled' : ''}>
+                            ${product.stock === 0 ? 'स्टॉक में नहीं' : 'कार्ट में जोड़ें'}
+                        </button>
+                    </div>
+                    <div class="md:w-1/2 p-4">
+                        <h2 class="text-3xl font-bold text-gray-900 mb-2">${product.name}</h2>
+                        <p class="text-lg text-red-600 font-semibold mb-4">${product.flavor} फ्लेवर</p>
+                        <p class="text-gray-600 mb-4">${product.description}</p>
+                        <div class="p-4 bg-gray-100 rounded-lg">
+                            <h4 class="font-bold text-gray-800">स्टॉक उपलब्धता:</h4>
+                            <p class="${product.stock === 0 ? 'text-red-500 font-bold' : 'text-green-600'}">${product.stock > 0 ? `${product.stock} Units Available` : 'Out of Stock'}</p>
+                        </div>
+                    </div>
+                </div>
+                <hr class="my-6">
+                <h3 class="text-2xl font-bold text-gray-800 mb-4">ग्राहक रिव्यू (Customer Reviews)</h3>
+            `;
+            
+            // Load Reviews
+            const reviews = await loadReviews(productId);
+            let reviewsHtml = reviews.length > 0
+                ? reviews.map(r => `
+                    <div class="review-card p-4 mb-4 bg-yellow-50 rounded-lg shadow-sm">
+                        <div class="flex items-center mb-1">
+                            ${getStarHtml(r.rating)}
+                            <span class="text-xs text-gray-500 ml-3">${r.userEmail || 'Anonymous'}</span>
+                        </div>
+                        <p class="text-gray-700">${r.text}</p>
+                        <p class="text-xs text-gray-400 mt-1">${r.timestamp ? new Date(r.timestamp.toDate()).toLocaleDateString('en-IN') : ''}</p>
+                    </div>
+                `).join('')
+                : '<p class="text-gray-500 p-4 text-center">अभी तक कोई रिव्यू नहीं है। पहले रिव्यू दें!</p>';
+            
+            reviewsContainer.innerHTML = reviewsHtml;
+            
+            modal.classList.remove('hidden');
+        };
+
+        const loadReviews = async (productId) => {
+            const reviewsColRef = getPublicReviewsCollectionRef(productId);
+            try {
+                const q = query(reviewsColRef);
+                const querySnapshot = await getDocs(q);
+                return querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            } catch (error) {
+                console.error("Error loading reviews:", error);
+                return [];
+            }
+        };
+
+        window.submitReview = async (event) => {
+            event.preventDefault();
+            if (!userId || isAdmin) {
+                showMessage("Please login with a customer account to submit a review.", 'error');
+                return;
+            }
+
+            const productId = document.getElementById('review-product-id').value;
+            const rating = parseInt(document.querySelector('input[name="rating"]:checked')?.value, 10);
+            const reviewText = document.getElementById('review-text').value.trim();
+            const product = products.find(p => p.id === productId);
+
+            if (!rating) {
+                showMessage("Please select a star rating.", 'error');
+                return;
+            }
+            if (!reviewText) {
+                showMessage("Please write a short review.", 'error');
+                return;
+            }
+            if (!product) {
+                 showMessage("Product not found.", 'error');
+                 return;
+            }
+
+            const reviewsColRef = getPublicReviewsCollectionRef(productId);
+
+            try {
+                await addDoc(reviewsColRef, {
+                    productId: productId,
+                    userId: userId,
+                    userEmail: auth.currentUser.email,
+                    rating: rating,
+                    text: reviewText,
+                    timestamp: serverTimestamp()
+                });
+
+                showMessage("Review submitted successfully! Thank you.", 'info');
+                document.getElementById('review-form').reset();
+                
+                // Re-open modal to show new review and updated average
+                window.showProductDetails(productId); 
+                
+            } catch (error) {
+                showMessage(`Failed to submit review: ${error.message}`, 'error');
+                console.error("Review submission error:", error);
+            }
+        };
+
+
+        // --- Admin Panel Logic ---
+        
+        const renderAdminPanel = () => {
+            const modal = document.getElementById('admin-modal');
+            const adminList = document.getElementById('admin-product-list');
+            let html = '';
+
+            products.forEach(p => {
+                html += `
+                    <div class="bg-white p-4 mb-3 rounded-lg shadow-sm flex flex-col md:flex-row items-center justify-between">
+                        <div class="font-bold text-lg text-gray-800 w-full md:w-1/3 mb-2 md:mb-0">${p.name}</div>
+                        <div class="flex items-center space-x-4 admin-input-group w-full md:w-2/3 justify-end">
+                            <!-- Price Input -->
+                            <div class="flex items-center">
+                                <label for="price-${p.id}" class="text-sm font-semibold">Price (INR):</label>
+                                <input id="price-${p.id}" type="number" value="${p.price}" class="w-24 p-2 border rounded-lg text-right" min="1">
+                            </div>
+                            
+                            <!-- Stock Input -->
+                            <div class="flex items-center">
+                                <label for="stock-${p.id}" class="text-sm font-semibold">Stock:</label>
+                                <input id="stock-${p.id}" type="number" value="${p.stock}" class="w-20 p-2 border rounded-lg text-right" min="0">
+                            </div>
+
+                            <button onclick="window.updateProductDetails('${p.id}')" class="bg-blue-600 text-white p-2 rounded-lg hover:bg-blue-700 transition duration-150">Update</button>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            adminList.innerHTML = html;
+            modal.classList.remove('hidden');
+        };
+        
+        window.updateProductDetails = async (productId) => {
+            const newPrice = parseFloat(document.getElementById(`price-${productId}`).value);
+            const newStock = parseInt(document.getElementById(`stock-${productId}`).value, 10);
+            
+            if (isNaN(newPrice) || newPrice <= 0) {
+                showMessage('Invalid price.', 'error');
+                return;
+            }
+             if (isNaN(newStock) || newStock < 0) {
+                showMessage('Invalid stock quantity.', 'error');
+                return;
+            }
+
+            const productRef = doc(getPublicProductsCollectionRef(), productId);
+
+            try {
+                await updateDoc(productRef, {
+                    price: newPrice,
+                    stock: newStock
+                });
+                showMessage(`${products.find(p => p.id === productId).name} updated successfully!`, 'info');
+                // The onSnapshot listener will re-render the products automatically
+            } catch (error) {
+                showMessage(`Update failed: ${error.message}`, 'error');
+                console.error("Admin update error:", error);
+            }
+        };
+
+        // Expose to window for inline HTML calls
+        window.showAdminPanel = renderAdminPanel;
+        
+        // --- Order & Label Logic ---
+
+        window.placeOrder = async () => {
+            if (!auth.currentUser || auth.currentUser.isAnonymous) {
+                showMessage('Please login or signup to place an order.', 'error');
+                document.getElementById('auth-modal').classList.remove('hidden');
+                return;
+            }
+            
+            if (Object.keys(cart).length === 0) {
+                showMessage('Your cart is empty!', 'error');
+                return;
+            }
+
+            // Simple mock address collection
+            const shippingAddress = prompt("Enter your shipping address (Name, Street, City, ZIP):");
+            if (!shippingAddress || shippingAddress.length < 10) {
+                showMessage('Shipping address is required to place order.', 'error');
+                return;
+            }
+            
+            let totalAmount = 0;
+            const orderItems = Object.values(cart).map(item => {
+                const product = products.find(p => p.id === item.id);
+                const itemTotal = item.quantity * product.price;
+                totalAmount += itemTotal;
+                return {
+                    id: item.id,
+                    name: item.name,
+                    quantity: item.quantity,
+                    price: product.price,
+                    total: itemTotal
+                };
+            });
+            
+            // Start Transaction to deduct stock AND save order atomically
+            const orderRef = doc(getPublicOrdersCollectionRef());
+            const cartRef = getPrivateCartRef(auth.currentUser.uid);
+            
+            try {
+                await runTransaction(db, async (transaction) => {
+                    // 1. Check and deduct stock
+                    for (const item of orderItems) {
+                        const productRef = doc(getPublicProductsCollectionRef(), item.id);
+                        const productDoc = await transaction.get(productRef);
+                        
+                        if (!productDoc.exists()) {
+                            throw new Error(`Product ${item.name} not found.`);
+                        }
+                        
+                        const currentStock = productDoc.data().stock || 0;
+                        const requiredQuantity = item.quantity;
+                        
+                        if (currentStock < requiredQuantity) {
+                            throw new Error(`Stock error: Only ${currentStock} units of ${item.name} available.`);
+                        }
+                        
+                        // Deduct stock
+                        transaction.update(productRef, { stock: currentStock - requiredQuantity });
+                    }
+                    
+                    // 2. Save Order
+                    transaction.set(orderRef, {
+                        orderId: orderRef.id,
+                        userId: auth.currentUser.uid,
+                        userEmail: auth.currentUser.email,
+                        items: orderItems,
+                        totalAmount: totalAmount,
+                        shippingAddress: shippingAddress,
+                        orderDate: serverTimestamp(),
+                        status: 'Pending'
+                    });
+                    
+                    // 3. Clear Cart
+                    transaction.set(cartRef, { items: JSON.stringify({}) });
+                });
+                
+                // Transaction successful
+                cart = {}; // Clear local cart
+                updateCartUI();
+                showMessage(`Order #${orderRef.id.substring(0, 8)} placed successfully! Total: ${formatPrice(totalAmount)}`, 'info');
+                document.getElementById('cart-modal').classList.add('hidden');
+
+            } catch (e) {
+                showMessage(`Order Failed: ${e.message}`, 'error');
+                console.error("Transaction failed: ", e);
+            }
+        };
+
+        const renderOrders = async () => {
+            const modal = document.getElementById('orders-modal');
+            const ordersList = document.getElementById('orders-list');
+            
+            let ordersQuery;
+            if (isAdmin) {
+                // Admin sees ALL orders
+                ordersQuery = query(getPublicOrdersCollectionRef());
+            } else {
+                // User sees only their orders
+                ordersQuery = query(getPublicOrdersCollectionRef(), where("userId", "==", userId));
+            }
+
+            try {
+                const querySnapshot = await getDocs(ordersQuery);
+                let html = '';
+                
+                if (querySnapshot.empty) {
+                    html = `<p class="text-center text-lg text-gray-500 py-10">${isAdmin ? 'No orders found in the system.' : 'You have not placed any orders yet.'}</p>`;
+                } else {
+                    querySnapshot.docs
+                        .map(doc => ({ id: doc.id, ...doc.data() }))
+                        // Sort by date descending (latest first). Firestore timestamps need to be converted to date objects.
+                        .sort((a, b) => (b.orderDate ? b.orderDate.toMillis() : 0) - (a.orderDate ? a.orderDate.toMillis() : 0)) 
+                        .forEach(order => {
+                            const date = order.orderDate ? new Date(order.orderDate.toDate()).toLocaleDateString('en-IN') : 'N/A';
+                            const itemSummary = order.items.map(i => `${i.name} (${i.quantity})`).join(', ');
+                            const labelButton = isAdmin 
+                                ? `<button onclick="window.generateShippingLabel('${order.id}')" class="bg-green-500 hover:bg-green-600 text-white font-semibold py-1 px-3 rounded-lg transition duration-150 ml-3 no-print"><i class="fas fa-print mr-1"></i> Generate Label</button>`
+                                : '';
+
+                            html += `
+                                <div class="bg-white p-5 mb-4 rounded-xl shadow-md border-t-4 border-red-500">
+                                    <div class="flex flex-wrap justify-between items-start mb-3 border-b pb-2">
+                                        <h4 class="text-lg font-bold text-gray-800">Order ID: <span class="text-red-600">${order.orderId.substring(0, 8)}</span></h4>
+                                        <div class="text-sm text-gray-600">
+                                            <p>Date: ${date}</p>
+                                            <p>Status: <span class="font-semibold text-blue-600">${order.status}</span></p>
+                                        </div>
+                                    </div>
+                                    <p class="text-gray-700 mb-2"><strong>Items:</strong> ${itemSummary}</p>
+                                    <p class="text-gray-700 mb-3"><strong>Shipping Address:</strong> ${order.shippingAddress}</p>
+                                    <div class="flex justify-between items-center pt-2 border-t mt-3">
+                                        <span class="text-xl font-black text-red-700">Total: ${formatPrice(order.totalAmount)}</span>
+                                        ${labelButton}
+                                    </div>
+                                </div>
+                            `;
+                    });
+                }
+
+                ordersList.innerHTML = html;
+                modal.classList.remove('hidden');
+            } catch (error) {
+                showMessage(`Could not load orders: ${error.message}`, 'error');
+                console.error("Order loading error:", error);
+            }
+        };
+        
+        // Expose to window for inline HTML calls
+        window.showOrders = renderOrders;
+
+
+        window.generateShippingLabel = async (orderId) => {
+             const ordersQuery = query(getPublicOrdersCollectionRef(), where("__name__", "==", orderId));
+             
+             try {
+                const querySnapshot = await getDocs(ordersQuery);
+                const orderDoc = querySnapshot.docs[0];
+                if (!orderDoc || !orderDoc.exists()) {
+                    showMessage('Order not found for label generation.', 'error');
+                    return;
+                }
+                const order = { id: orderDoc.id, ...orderDoc.data() };
+                
+                const date = order.orderDate ? new Date(order.orderDate.toDate()).toLocaleDateString('en-IN') : 'N/A';
+                const barcodeMock = Math.floor(Math.random() * 9000000000) + 1000000000;
+                
+                const labelWindow = window.open('', 'Print Label', 'height=600,width=800');
+                
+                labelWindow.document.write(`
+                    <html>
+                    <head>
+                        <title>Shipping Label - ${order.orderId.substring(0, 8)}</title>
+                        <style>
+                            body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
+                            .print-area {
+                                width: 100%;
+                                box-sizing: border-box;
+                                padding: 20px;
+                                border: 3px solid #000;
+                                margin: 20px;
+                            }
+                            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 15px; }
+                            .address-box { border: 1px solid #ccc; padding: 15px; border-radius: 5px; margin-bottom: 15px; }
+                            .items-list { border-top: 1px solid #ccc; padding-top: 10px; }
+                            .barcode-area { text-align: center; margin-top: 20px; }
+                            .barcode-area img { max-width: 90%; height: auto; }
+                            .ship-to { font-size: 1.5em; font-weight: bold; }
+                            @media print {
+                                .print-area { border: none; margin: 0; padding: 0; }
+                            }
+                        </style>
+                    </head>
+                    <body>
+                        <div class="print-area">
+                            <div class="header">
+                                <h1 style="font-size: 2em; color: #E53E3E; font-weight: bold;">POPS of MITHILA</h1>
+                                <div style="text-align: right;">
+                                    <p style="margin: 0;">Order ID: ${order.orderId.substring(0, 8)}</p>
+                                    <p style="margin: 0;">Date: ${date}</p>
+                                </div>
+                            </div>
+
+                            <div class="address-box" style="margin-bottom: 20px; background-color: #f9f9f9;">
+                                <p style="font-size: 1.2em; margin: 0 0 10px 0;"><strong>SHIP FROM:</strong></p>
+                                <p style="margin: 0; font-size: 0.9em;">Pops of Mithila HQ,</p>
+                                <p style="margin: 0; font-size: 0.9em;">Kosi Makhana Hub, Bhagalpur, 812001, Bihar, India</p>
+                            </div>
+
+                            <div class="address-box" style="border-color: #E53E3E;">
+                                <p class="ship-to" style="margin: 0 0 10px 0;">SHIP TO:</p>
+                                <pre style="font-family: Arial, sans-serif; font-size: 1.1em; margin: 0; white-space: pre-wrap;">${order.shippingAddress}</pre>
+                            </div>
+
+                            <div class="items-list">
+                                <p style="font-weight: bold; margin-bottom: 5px;">Order Details:</p>
+                                ${order.items.map(item => `<p style="margin: 0; font-size: 0.9em;">- ${item.name} x ${item.quantity} (${formatPrice(item.total)})</p>`).join('')}
+                                <p style="font-weight: bold; margin-top: 10px;">Total: ${formatPrice(order.totalAmount)}</p>
+                            </div>
+
+                            <div class="barcode-area">
+                                <img src="https://barcode.tec-it.com/barcode.ashx?data=${barcodeMock}&code=Code128&dpi=96" alt="Barcode">
+                                <p style="font-size: 0.8em; margin-top: 5px;">Tracking No: ${barcodeMock}</p>
+                            </div>
+                        </div>
+                        <script>window.onload = function() { window.print(); }</script>
+                    </body>
+                    </html>
+                `);
+                labelWindow.document.close();
+             } catch (error) {
+                showMessage(`Error generating label: ${error.message}`, 'error');
+                console.error("Label error:", error);
+             }
+        };
+
+
+        // --- Firestore Listeners ---
+
+        const setupProductsListener = () => {
+             // 1. Initial Product List Setup (Only runs once to ensure data)
+             // We do this inside a listener so the list gets updated automatically
+             const initialProductsRef = getPublicProductsCollectionRef();
+             getDocs(initialProductsRef).then(snapshot => {
+                 if (snapshot.empty) {
+                     console.log("No products found. Populating initial data...");
+                     // Mock Initial Products (You can change these later via Admin Panel)
+                     const mockProducts = [
+                         { id: 'p1', name: 'Original Poha Pops', flavor: 'Classic Salted', price: 499.00, stock: 50, description: 'The original, lightly salted makhana pops. A healthy and traditional snack.', image: 'https://placehold.co/300x200/FFD700/000?text=Classic+Makhana' },
+                         { id: 'p2', name: 'Spicy Peri-Peri Pops', flavor: 'Hot & Tangy', price: 599.00, stock: 0, description: 'Makhana pops with a fiery Peri-Peri twist. Perfect for spice lovers.', image: 'https://placehold.co/300x200/FF4500/FFF?text=Peri-Peri+Makhana' },
+                         { id: 'p3', name: 'Cheesy Delight Pops', flavor: 'Cheddar Cheese', price: 650.00, stock: 25, description: 'Rich and creamy Cheddar cheese flavored makhana. Kid-friendly and delicious.', image: 'https://placehold.co/300x200/4682B4/FFF?text=Cheese+Makhana' },
+                         { id: 'p4', name: 'Desi Chatpata Pops', flavor: 'Masala Chaat', price: 549.00, stock: 12, description: 'A burst of Indian street-food flavor in every bite.', image: 'https://placehold.co/300x200/9ACD32/000?text=Chatpata+Makhana' },
+                     ];
+                     mockProducts.forEach(p => {
+                         setDoc(doc(initialProductsRef, p.id), { ...p, averageRating: 0, reviewCount: 0 });
+                     });
+                 }
+             });
+
+             // 2. Real-time Product Listener
+             const productsColRef = getPublicProductsCollectionRef();
+             onSnapshot(productsColRef, (snapshot) => {
+                 let updatedProducts = [];
+                 let ratingUpdates = [];
+
+                 snapshot.docs.forEach(doc => {
+                     const data = doc.data();
+                     updatedProducts.push({ id: doc.id, ...data });
+                     ratingUpdates.push(updateAverageRating(doc.id)); // Queue rating update
+
+                 });
+                 
+                 products = updatedProducts;
+                 renderProducts();
+                 updateCartUI(); // Update cart in case price/stock changed
+                 
+                 // Run rating updates in the background
+                 Promise.all(ratingUpdates).then(() => {
+                    // Re-render products after ratings are updated in Firestore
+                    renderProducts(); 
+                 });
+             });
+        };
+        
+        const updateAverageRating = async (productId) => {
+            const reviewsColRef = getPublicReviewsCollectionRef(productId);
+            const productRef = doc(getPublicProductsCollectionRef(), productId);
+            
+            try {
+                const snapshot = await getDocs(reviewsColRef);
+                const totalReviews = snapshot.size;
+                if (totalReviews === 0) {
+                    await updateDoc(productRef, { averageRating: 0, reviewCount: 0 });
+                    return;
+                }
+                
+                let sumRating = 0;
+                snapshot.forEach(doc => {
+                    sumRating += doc.data().rating;
+                });
+                
+                const avgRating = sumRating / totalReviews;
+                
+                await updateDoc(productRef, {
+                    averageRating: parseFloat(avgRating.toFixed(1)),
+                    reviewCount: totalReviews
+                });
+
+            } catch (error) {
+                console.error(`Error updating rating for ${productId}:`, error);
+            }
+        };
+
+
+        // --- Initialization ---
+
+        window.onload = async () => {
+            // 1. Authentication Setup
+            if (initialAuthToken) {
+                try {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } catch (error) {
+                    console.error("Custom token sign-in failed, falling back to anonymous:", error);
+                    await signInAnonymously(auth);
+                }
+            } else {
+                await signInAnonymously(auth);
+            }
+
+            // 2. Auth State Listener
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    // Load user's cart
+                    cart = await loadCartFromFirestore(userId);
+                } else {
+                    // Fallback for security rules check
+                    userId = null;
+                    cart = {};
+                }
+                updateAuthUI(user);
+                updateCartUI(); // Initial cart render
+                // Products listener is called only after auth check to ensure security rules are met
+                setupProductsListener();
+            });
+
+            // Currency Switch Listener
+            document.getElementById('currency-switch').addEventListener('change', (e) => {
+                currency = e.target.value;
+                renderProducts();
+                updateCartUI();
+            });
+            
+            // Language Switch Listener (Mock)
+            document.getElementById('lang-switch').addEventListener('change', (e) => {
+                 showMessage(`Language switched to ${e.target.value}. Content is currently only available in Hindi/English (Hinglish).`, 'info');
+            });
+        };
+    </script>
+    
+    <!-- Global Alert/Message Box -->
+    <div id="global-alert" class="fixed top-5 left-1/2 transform -translate-x-1/2 z-50 w-full max-w-sm hidden">
+        <!-- Messages appear here -->
+    </div>
+
+    <!-- Header & Navigation -->
+    <header class="sticky top-0 z-40 bg-white shadow-md">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between items-center h-20">
+                <!-- Logo/Brand Name -->
+                <div class="flex-shrink-0">
+                    <h1 class="text-3xl font-extrabold text-red-600 tracking-tight">Pops of Mithila</h1>
+                    <p class="text-xs text-gray-500">Makhana E-commerce Pro</p>
+                </div>
+
+                <!-- Search Bar (Visible on Desktop) -->
+                <div class="hidden md:block w-full max-w-md mx-8">
+                    <div class="relative">
+                        <input id="search-input" type="text" oninput="window.handleSearch()" placeholder="Search Products or Flavors..." class="w-full p-3 pl-10 border border-gray-300 rounded-full focus:outline-none focus:ring-2 focus:ring-red-500 transition duration-150">
+                        <i class="fas fa-search absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
+                    </div>
+                </div>
+
+                <!-- User Actions & Cart -->
+                <div class="flex items-center space-x-4">
+                    
+                    <!-- Language & Currency -->
+                    <select id="lang-switch" class="p-2 border border-gray-300 rounded-lg text-sm bg-gray-50">
+                        <option value="hi">Hindi</option>
+                        <option value="en">English</option>
+                    </select>
+                    <select id="currency-switch" class="p-2 border border-gray-300 rounded-lg text-sm bg-gray-50">
+                        <option value="INR">₹ INR</option>
+                        <option value="USD">$ USD</option>
+                    </select>
+
+                    <!-- Cart Button -->
+                    <button onclick="document.getElementById('cart-modal').classList.remove('hidden')" class="relative p-2 text-gray-600 hover:text-red-600 transition duration-150 bg-gray-100 rounded-full">
+                        <i class="fas fa-shopping-cart text-xl"></i>
+                        <span id="cart-count" class="absolute top-0 right-0 inline-flex items-center justify-center px-2 py-1 text-xs font-bold leading-none text-white transform translate-x-1/2 -translate-y-1/2 bg-red-600 rounded-full">0</span>
+                    </button>
+                    
+                    <!-- Auth Button -->
+                    <div class="relative group">
+                        <button id="auth-button" class="flex items-center p-2 text-gray-600 hover:text-red-600 transition duration-150 bg-gray-100 rounded-full">
+                            <i class="fas fa-user-circle text-xl mr-2"></i> 
+                            <span id="auth-text" class="text-sm font-semibold">Guest</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Mobile Search Bar -->
+        <div class="md:hidden px-4 pb-4">
+            <div class="relative">
+                <input id="search-input-mobile" type="text" oninput="window.handleSearch()" placeholder="Search Products or Flavors..." class="w-full p-3 pl-10 border border-gray-300 rounded-full focus:outline-none focus:ring-2 focus:ring-red-500 transition duration-150">
+                <i class="fas fa-search absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        
+        <!-- Feature Buttons -->
+        <div class="flex flex-wrap justify-center md:justify-start gap-4 mb-8">
+            <button id="admin-button" onclick="window.showAdminPanel()" class="hidden bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg transition duration-150">
+                <i class="fas fa-user-shield mr-2"></i> Admin Panel
+            </button>
+            <button id="my-orders-button" onclick="window.showOrders()" class="hidden bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg transition duration-150">
+                <i class="fas fa-shopping-bag mr-2"></i> My Orders
+            </button>
+        </div>
+        
+        <!-- Product Grid -->
+        <h2 class="text-3xl font-bold text-gray-800 mb-6 border-b pb-2">All Makhana Pops</h2>
+        <div id="product-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
+            <!-- Products will be dynamically loaded here -->
+            <p class="col-span-full text-center text-gray-500">Loading products...</p>
+        </div>
+    </main>
+
+    <!-- --- Modals --- -->
+
+    <!-- 1. Auth Modal (Login/Signup) -->
+    <div id="auth-modal" class="modal-overlay fixed inset-0 hidden z-50 flex items-center justify-center p-4">
+        <div class="bg-white p-8 rounded-xl shadow-2xl w-full max-w-sm">
+            <h2 class="text-2xl font-bold text-gray-800 mb-6">Login / Signup</h2>
+            <input type="email" id="auth-email" placeholder="Email Address" class="w-full p-3 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500">
+            <input type="password" id="auth-password" placeholder="Password (min 6 chars)" class="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500">
+            <div class="space-y-4">
+                <button onclick="handleLogin()" class="w-full py-3 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 transition duration-150">Login</button>
+                <button onclick="handleSignup()" class="w-full py-3 border border-red-600 text-red-600 font-bold rounded-xl hover:bg-red-100 transition duration-150">Signup</button>
+            </div>
+            <button onclick="document.getElementById('auth-modal').classList.add('hidden')" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600">
+                <i class="fas fa-times text-xl"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- 2. Cart Modal -->
+    <div id="cart-modal" class="modal-overlay fixed inset-0 hidden z-50 flex items-center justify-center p-4">
+        <div class="bg-white p-8 rounded-xl shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col">
+            <h2 class="text-2xl font-bold text-gray-800 mb-6 border-b pb-2">Your Shopping Cart</h2>
+            
+            <ul id="cart-list" class="flex-1 overflow-y-auto mb-6 -mr-4 pr-4">
+                <!-- Cart items will be loaded here -->
+            </ul>
+            
+            <div class="border-t pt-4">
+                <div class="flex justify-between items-center mb-4">
+                    <span class="text-xl font-bold text-gray-800">Total:</span>
+                    <span id="cart-total" class="text-2xl font-black text-red-600">₹0.00</span>
+                </div>
+                <button id="cart-checkout-button" onclick="window.placeOrder()" class="w-full py-3 bg-green-600 text-white font-bold rounded-xl hover:bg-green-700 transition duration-150" disabled>
+                    Checkout <i class="fas fa-arrow-right ml-2"></i>
+                </button>
+            </div>
+            <button onclick="document.getElementById('cart-modal').classList.add('hidden')" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600">
+                <i class="fas fa-times text-xl"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- 3. Product Detail Modal -->
+    <div id="product-detail-modal" class="modal-overlay fixed inset-0 hidden z-50 flex items-center justify-center p-4">
+        <div class="bg-white p-6 rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto relative">
+            
+            <div id="product-detail-content">
+                <!-- Product details will be injected here -->
+            </div>
+            
+            <!-- Review Submission Form -->
+            <form id="review-form" onsubmit="window.submitReview(event)" class="bg-gray-100 p-6 rounded-xl my-6">
+                <h4 class="text-xl font-bold mb-3">Add Your Review</h4>
+                <input type="hidden" id="review-product-id">
+
+                <div class="flex items-center mb-3">
+                    <span class="font-semibold mr-3">Your Rating:</span>
+                    <div class="star-rating">
+                        <input type="radio" id="star5" name="rating" value="5"><label for="star5" title="5 stars"></label>
+                        <input type="radio" id="star4" name="rating" value="4"><label for="star4" title="4 stars"></label>
+                        <input type="radio" id="star3" name="rating" value="3"><label for="star3" title="3 stars"></label>
+                        <input type="radio" id="star2" name="rating" value="2"><label for="star2" title="2 stars"></label>
+                        <input type="radio" id="star1" name="rating" value="1"><label for="star1" title="1 star"></label>
+                    </div>
+                </div>
+
+                <textarea id="review-text" placeholder="Write your review here (max 200 chars)" maxlength="200" rows="3" class="w-full p-2 border rounded-lg mb-4 focus:ring-red-500"></textarea>
+                
+                <button type="submit" class="bg-red-600 text-white font-bold py-2 px-4 rounded-xl hover:bg-red-700 transition duration-150">Submit Review</button>
+            </form>
+            
+            <!-- Reviews List -->
+            <div id="reviews-container">
+                <!-- Reviews will be loaded here -->
+            </div>
+
+
+            <button onclick="document.getElementById('product-detail-modal').classList.add('hidden'); document.getElementById('review-form').reset();" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600">
+                <i class="fas fa-times text-xl"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- 4. Admin Panel Modal -->
+    <div id="admin-modal" class="modal-overlay fixed inset-0 hidden z-50 flex items-center justify-center p-4">
+        <div class="bg-gray-50 p-6 rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto relative">
+            <h2 class="text-3xl font-bold text-gray-800 mb-6 border-b pb-2 text-center">Admin Panel: Product Management</h2>
+            
+            <div id="admin-product-list" class="space-y-4">
+                <!-- Admin product list will be loaded here -->
+            </div>
+
+            <button onclick="document.getElementById('admin-modal').classList.add('hidden')" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600">
+                <i class="fas fa-times text-xl"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- 5. Orders Modal -->
+    <div id="orders-modal" class="modal-overlay fixed inset-0 hidden z-50 flex items-center justify-center p-4">
+        <div class="bg-gray-50 p-6 rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto relative">
+            <h2 class="text-3xl font-bold text-gray-800 mb-6 border-b pb-2 text-center" id="orders-modal-title">
+                <i class="fas fa-box-open mr-2 text-red-600"></i> <span id="orders-title-text">Orders History</span>
+            </h2>
+            
+            <div id="orders-list" class="space-y-4">
+                <!-- Orders will be loaded here -->
+            </div>
+
+            <button onclick="document.getElementById('orders-modal').classList.add('hidden')" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600">
+                <i class="fas fa-times text-xl"></i>
+            </button>
+        </div>
+    </div>
+
+
+</body>
+</html>
+
